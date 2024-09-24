@@ -1,7 +1,6 @@
 pragma solidity ^0.8.0;
 
 import "./ERC721AURIStorage.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title NFT MyToken项目入口
@@ -10,15 +9,18 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  * @notice ERC721AURIStorage继承ERC721A，并且对URI数据进行管理
  * @notice Ownable对项目相关权限进行访问控制
  */
-contract MyToken is ERC721A_URIStorage, Ownable {
+contract MyToken is ERC721A_URIStorage {
     // Optional mapping for token URIs
-    mapping(uint256 tokenId => string) private _tokenURIs;
+    mapping(uint256 => string) private _tokenURIs;
+    address owner;
 
     constructor(
         string memory name,
         string memory symbol,
         address initialOwner
-    ) ERC721A(name, symbol) Ownable(initialOwner) {}
+    ) ERC721A(name, symbol) {
+        owner = initialOwner;
+    }
 
     /**
      * @dev Safely Mint 最外层函数，为to地址铸造quantity数量的token，同时为每个token分配一个unique URI。
@@ -34,7 +36,7 @@ contract MyToken is ERC721A_URIStorage, Ownable {
         address to,
         uint256 quantity,
         string[] memory uri
-    ) public onlyOwner {
+    ) public {
         uint256 tokenId = _currentIndex;
 
         require(
