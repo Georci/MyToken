@@ -15,21 +15,9 @@ interface ERC721A__IERC721Receiver {
 }
 
 contract ERC721A is IERC721A {
-    struct TokenApprovalRef {
-        address value;
-    }
-
-    // Token name
-    string private _name;
-
-    // Token symbol
-    string private _symbol;
-
-    // The next token ID to be minted.
-    uint256 internal _currentIndex;
-
-    // The number of tokens burned.
-    uint256 private _burnCounter;
+    // =============================================================
+    //                           CONSTANTS
+    // =============================================================
 
     // Ken：以下这四个掩码用于在TokenOwnership中获取对应的数据
     // Mask of an entry in packed address data.
@@ -65,31 +53,57 @@ contract ERC721A is IERC721A {
     // Mask of all 256 bits in a packed ownership except the 24 bits for `extraData`.
     uint256 private constant _BITMASK_EXTRA_DATA_COMPLEMENT = (1 << 232) - 1;
 
+    struct TokenApprovalRef {
+        address value;
+    }
+
+    // =============================================================
+    //                            STORAGE
+    // =============================================================
+
+    // Token name
+    string private _name;
+
+    // Token symbol
+    string private _symbol;
+
+    // The next token ID to be minted.
+    uint256 internal _currentIndex;
+
+    // The number of tokens burned.
+    uint256 private _burnCounter;
+
+    /**
+     * @notice Ken：其实仔细分析了一番，会发现ERC721A合约中的整个关键业务都是在对下面这两个mapping数据进行操作
+     */
     // Mapping from token ID to ownership details
-    // An empty struct value does not necessarily mean the token is unowned.
-    // See {_packedOwnershipOf} implementation for details.
+    // 该mapping在mint的时候被初始化，burn的时候burn字段被标记为true，transfer的时候addr发生改变，上述三个操作的同时extraData字段可以被写入
     //
     // Bits Layout:
-    // - [0..159]   `addr` 160bit
-    // - [160..223] `startTimestamp` 64bit uint8
-    // - [224]      `burned` bool
+    // - [0..159]   `addr` 160bit 当前token的owner
+    // - [160..223] `startTimestamp` 64bit uint8 当前token被mint的blockNumber
+    // - [224]      `burned` bool 当前token是否已经被burn
     // - [225]      `nextInitialized` bool 指示下一个tokenId是否已经被初始化
-    // - [232..255] `extraData`
+    // - [232..255] `extraData` bytes 这个其实是固定的data(from,to,previous_packedOwnerships)
     mapping(uint256 => uint256) private _packedOwnerships;
 
+    /**
+     * @notice Ken：以owner address作为key，该账户的余额信息作为value
+     */
     // Mapping owner address to address data.
     //
     // Bits Layout:
-    // - [0..63]    `balance`
-    // - [64..127]  `numberMinted`
-    // - [128..191] `numberBurned`
-    // - [192..255] `aux`
+    // - [0..63]    `balance` 当前address NFT的数量
+    // - [64..127]  `numberMinted` 当前address 铸造NFT的数量
+    // - [128..191] `numberBurned` 当前address 销毁NFT的数量
+    // - [192..255] `aux` 被保留用作用户自定义字段，可以用来作为用户与某地址交互次数等特定数据的记录
     mapping(address => uint256) private _packedAddressData;
 
     // Mapping from owner to operator approvals
     mapping(address => mapping(address => bool)) private _operatorApprovals;
 
     // Mapping from token ID to approved address.
+    // Ken：当一个token被approve的时候，该token对应的key被改写为对应的被授权地址，直到transfer或者burn操作发生
     mapping(uint256 => TokenApprovalRef) private _tokenApprovals;
 
     // The `Transfer` event signature is given by:
@@ -103,6 +117,10 @@ contract ERC721A is IERC721A {
         _currentIndex = _startTokenId();
     }
 
+    // =============================================================
+    //                        IERC721Metadata
+    // =============================================================
+
     function name() external view returns (string memory) {
         return _name;
     }
@@ -114,6 +132,9 @@ contract ERC721A is IERC721A {
         return _symbol;
     }
 
+    // =============================================================
+    //                   TOKEN COUNTING OPERATIONS
+    // =============================================================
     /**
      * @dev 返回第一个NFT的id
      */
@@ -166,6 +187,10 @@ contract ERC721A is IERC721A {
         return _burnCounter;
     }
 
+    // =============================================================
+    //                    ADDRESS DATA OPERATIONS
+    // =============================================================
+
     /**
      * @dev 返回一个账户目前所拥有的NFT数量
      * @param owner 账户
@@ -178,6 +203,28 @@ contract ERC721A is IERC721A {
     }
 
     /**
+     * 返回指定账户铸造的NFT数量
+     */
+    function _numberMinted(address owner) internal view returns (uint256) {
+        return
+            (_packedAddressData[owner] >> _BITPOS_NUMBER_MINTED) &
+            _BITMASK_ADDRESS_DATA_ENTRY;
+    }
+
+    /**
+     * 返回由owner或者代表owner销毁的代币数量
+     */
+    function _numberBurned(address owner) internal view returns (uint256) {
+        return
+            (_packedAddressData[owner] >> _BITPOS_NUMBER_BURNED) &
+            _BITMASK_ADDRESS_DATA_ENTRY;
+    }
+
+    // =============================================================
+    //                     OWNERSHIPS OPERATIONS
+    // =============================================================
+
+    /**
      * @dev 返回指定id token的拥有者
      */
     function ownerOf(
@@ -186,9 +233,54 @@ contract ERC721A is IERC721A {
         return address(uint160(_packedOwnershipOf(tokenId)));
     }
 
-    // =============================================================
-    //                        OWNERSHIP OPERATIONS
-    // =============================================================
+    /**
+     * @dev 根据token id查询用户信息
+     */
+    function _packedOwnershipOf(
+        uint256 tokenId
+    ) private view returns (uint256 packed) {
+        if (_startTokenId() <= tokenId) {
+            packed = _packedOwnerships[tokenId];
+
+            if (tokenId > _sequentialUpTo()) {
+                if (_packedOwnershipExists(packed)) return packed;
+                _revert(OwnerQueryForNonexistentToken.selector);
+            }
+
+            // If the data at the starting slot does not exist, start the scan.
+            if (packed == uint256(0)) {
+                if (tokenId >= _currentIndex)
+                    _revert(OwnerQueryForNonexistentToken.selector);
+                // Invariant:
+                // There will always be an initialized ownership slot
+                // (i.e. `ownership.addr != address(0) && ownership.burned == false`)
+                // before an unintialized ownership slot
+                // (i.e. `ownership.addr == address(0) && ownership.burned == false`)
+                // Hence, `tokenId` will not underflow.
+                //
+                // We can directly compare the packed value.
+                // If the address is zero, packed will be zero.
+                // Ken：递减操作，直至找到相应的owner
+                for (;;) {
+                    unchecked {
+                        packed = _packedOwnerships[--tokenId];
+                    }
+                    if (packed == uint256(0)) continue;
+                    if (packed & _BITMASK_BURNED == uint256(0)) return packed;
+                    // Otherwise, the token is burned, and we must revert.
+                    // This handles the case of batch burned tokens, where only the burned bit
+                    // of the starting slot is set, and remaining slots are left uninitialized.
+                    _revert(OwnerQueryForNonexistentToken.selector);
+                }
+            }
+            // Otherwise, the data exists and we can skip the scan.
+            // This is possible because we have already achieved the target condition.
+            // This saves 2143 gas on transfers of initialized tokens.
+            // If the token is not burned, return `packed`. Otherwise, revert.
+            if (packed & _BITMASK_BURNED == uint256(0)) return packed;
+        }
+        _revert(OwnerQueryForNonexistentToken.selector);
+    }
 
     /**
      * @dev Ken：将OwnershipData打包为一个uint256类型的数据
@@ -227,7 +319,6 @@ contract ERC721A is IERC721A {
 
     /**
      * @dev Mints `quantity` tokens and transfers them to `to`.
-     *
      * Requirements:
      *
      * - `to` cannot be the zero address.
@@ -466,14 +557,17 @@ contract ERC721A is IERC721A {
         // The next `tokenId` to be minted (i.e. `_nextTokenId()`).
         uint256 end = _currentIndex;
         // Pointer to start and end (exclusive) of `tokenIds`.
+        // Ken：选取指针的开始与结束
         (uint256 ptr, uint256 ptrEnd) = _mdataERC721A(tokenIds);
 
         uint256 prevOwnershipPacked;
         address prevTokenOwner;
         uint256 prevTokenId;
         bool mayBurn;
+        // 循环
         unchecked {
             do {
+                // Ken：选取第一个要销毁的token ID
                 uint256 tokenId = _mloadERC721A(ptr);
                 uint256 miniBatchStart = tokenId;
                 // Revert `tokenId` is out of bounds.
@@ -486,6 +580,8 @@ contract ERC721A is IERC721A {
                 // Scan backwards for an initialized packed ownership slot.
                 // ERC721A's invariant guarantees that there will always be an initialized slot as long as
                 // the start of the backwards scan falls within `[_startTokenId() .. _nextTokenId())`.
+                // Ken：因为传入的tokenIds并不一定是连续的(1,2,3...)，可能是间断的(1,6,8)这样，所以需要下面for循环的操作来找到与当前销毁的token所共有的所有权数据
+                // Ken：e.g:owner连续铸造了(1,2,3)，但是他销毁的是3，但是3的所有权数据对应的是0，则需要找到1的所有权数据
                 for (
                     uint256 j = tokenId;
                     (prevOwnershipPacked = _packedOwnerships[j]) == uint256(0);
@@ -498,6 +594,7 @@ contract ERC721A is IERC721A {
                 address tokenOwner = address(uint160(prevOwnershipPacked));
                 if (tokenOwner != prevTokenOwner) {
                     prevTokenOwner = tokenOwner;
+                    // mayBurn为销毁权限，当前销毁是不是owner所进行的
                     mayBurn =
                         _orERC721A(by == address(0), tokenOwner == by) ||
                         isApprovedForAll(tokenOwner, by);
@@ -512,6 +609,7 @@ contract ERC721A is IERC721A {
                     if (!mayBurn)
                         if (uint160(by) != approvedAddressValue)
                             _revert(TransferCallerNotOwnerNorApproved.selector);
+                    // 开始销毁
                     assembly {
                         if approvedAddressValue {
                             sstore(approvedAddressSlot, 0) // Equivalent to `delete _tokenApprovals[tokenId]`.
@@ -700,7 +798,7 @@ contract ERC721A is IERC721A {
     }
 
     /**
-     * @dev Equivalent to `_batchTransferFrom(from, to, tokenIds)`.
+     * @dev Equivalent to `_batchTransferFrom(address(0), from, to, tokenIds)`.
      */
     function _batchTransferFrom(
         address from,
@@ -929,6 +1027,92 @@ contract ERC721A is IERC721A {
         }
     }
 
+    // =============================================================
+    //                      APPROVAL OPERATIONS
+    // =============================================================
+
+    /**
+     * @dev Equivalent to `_approve(to, tokenId, false)`.
+     */
+    function _approve(address to, uint256 tokenId) internal virtual {
+        _approve(to, tokenId, false);
+    }
+
+    /**
+     * @dev Gives permission to `to` to transfer `tokenId` token to another account.
+     * The approval is cleared when the token is transferred.
+     *
+     * Only a single account can be approved at a time, so approving the
+     * zero address clears previous approvals.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     *
+     * Emits an {Approval} event.
+     */
+    function _approve(
+        address to,
+        uint256 tokenId,
+        bool approvalCheck
+    ) internal virtual {
+        address owner = ownerOf(tokenId);
+
+        if (approvalCheck && _msgSenderERC721A() != owner)
+            if (!isApprovedForAll(owner, _msgSenderERC721A())) {
+                _revert(ApprovalCallerNotOwnerNorApproved.selector);
+            }
+
+        _tokenApprovals[tokenId].value = to;
+        emit Approval(owner, to, tokenId);
+    }
+
+    /**
+     * @dev Gives permission to `to` to transfer `tokenId` token to another account. See {ERC721A-_approve}.
+     *
+     * Requirements:
+     *
+     * - The caller must own the token or be an approved operator.
+     */
+    function approve(
+        address to,
+        uint256 tokenId
+    ) public payable virtual override {
+        _approve(to, tokenId, true);
+    }
+
+    /**
+     * @dev Returns the account approved for `tokenId` token.
+     *
+     * Requirements:
+     *
+     * - `tokenId` must exist.
+     */
+    function getApproved(
+        uint256 tokenId
+    ) public view virtual override returns (address) {
+        if (!_exists(tokenId))
+            _revert(ApprovalQueryForNonexistentToken.selector);
+
+        return _tokenApprovals[tokenId].value;
+    }
+
+    /**
+     * @dev 返回当前的packed是否表示一个NFT存在
+     */
+    function _packedOwnershipExists(
+        uint256 packed
+    ) private pure returns (bool result) {
+        assembly {
+            // The following is equivalent to `owner != address(0) && burned == false`.
+            // 只有当owner不为0，且未被销毁时(一旦被销毁，owner变成0)，result才能为true
+            result := gt(
+                and(packed, _BITMASK_ADDRESS),
+                and(packed, _BITMASK_BURNED)
+            )
+        }
+    }
+
     /**
      * @dev 返回当前调用者是否是被approved的地址或者是owner地址
      */
@@ -1018,159 +1202,6 @@ contract ERC721A is IERC721A {
     }
 
     // =============================================================
-    //                       APPROVAL OPERATIONS
-    // =============================================================
-
-    /**
-     * @dev Equivalent to `_approve(to, tokenId, false)`.
-     */
-    function _approve(address to, uint256 tokenId) internal virtual {
-        _approve(to, tokenId, false);
-    }
-
-    /**
-     * @dev Gives permission to `to` to transfer `tokenId` token to another account.
-     * The approval is cleared when the token is transferred.
-     *
-     * Only a single account can be approved at a time, so approving the
-     * zero address clears previous approvals.
-     *
-     * Requirements:
-     *
-     * - `tokenId` must exist.
-     *
-     * Emits an {Approval} event.
-     */
-    function _approve(
-        address to,
-        uint256 tokenId,
-        bool approvalCheck
-    ) internal virtual {
-        address owner = ownerOf(tokenId);
-
-        if (approvalCheck && _msgSenderERC721A() != owner)
-            if (!isApprovedForAll(owner, _msgSenderERC721A())) {
-                _revert(ApprovalCallerNotOwnerNorApproved.selector);
-            }
-
-        _tokenApprovals[tokenId].value = to;
-        emit Approval(owner, to, tokenId);
-    }
-
-    /**
-     * @dev Gives permission to `to` to transfer `tokenId` token to another account. See {ERC721A-_approve}.
-     *
-     * Requirements:
-     *
-     * - The caller must own the token or be an approved operator.
-     */
-    function approve(
-        address to,
-        uint256 tokenId
-    ) public payable virtual override {
-        _approve(to, tokenId, true);
-    }
-
-    /**
-     * @dev Returns the account approved for `tokenId` token.
-     *
-     * Requirements:
-     *
-     * - `tokenId` must exist.
-     */
-    function getApproved(
-        uint256 tokenId
-    ) public view virtual override returns (address) {
-        if (!_exists(tokenId))
-            _revert(ApprovalQueryForNonexistentToken.selector);
-
-        return _tokenApprovals[tokenId].value;
-    }
-
-    /**
-     * 返回指定账户铸造的NFT数量
-     */
-    function _numberMinted(address owner) internal view returns (uint256) {
-        return
-            (_packedAddressData[owner] >> _BITPOS_NUMBER_MINTED) &
-            _BITMASK_ADDRESS_DATA_ENTRY;
-    }
-
-    /**
-     * 返回由owner或者代表owner销毁的代币数量
-     */
-    function _numberBurned(address owner) internal view returns (uint256) {
-        return
-            (_packedAddressData[owner] >> _BITPOS_NUMBER_BURNED) &
-            _BITMASK_ADDRESS_DATA_ENTRY;
-    }
-
-    /**
-     * @dev 根据token id查询用户信息
-     */
-    function _packedOwnershipOf(
-        uint256 tokenId
-    ) private view returns (uint256 packed) {
-        if (_startTokenId() <= tokenId) {
-            packed = _packedOwnerships[tokenId];
-
-            if (tokenId > _sequentialUpTo()) {
-                if (_packedOwnershipExists(packed)) return packed;
-                _revert(OwnerQueryForNonexistentToken.selector);
-            }
-
-            // If the data at the starting slot does not exist, start the scan.
-            if (packed == uint256(0)) {
-                if (tokenId >= _currentIndex)
-                    _revert(OwnerQueryForNonexistentToken.selector);
-                // Invariant:
-                // There will always be an initialized ownership slot
-                // (i.e. `ownership.addr != address(0) && ownership.burned == false`)
-                // before an unintialized ownership slot
-                // (i.e. `ownership.addr == address(0) && ownership.burned == false`)
-                // Hence, `tokenId` will not underflow.
-                //
-                // We can directly compare the packed value.
-                // If the address is zero, packed will be zero.
-                // Ken：递减操作，直至找到相应的owner
-                for (;;) {
-                    unchecked {
-                        packed = _packedOwnerships[--tokenId];
-                    }
-                    if (packed == uint256(0)) continue;
-                    if (packed & _BITMASK_BURNED == uint256(0)) return packed;
-                    // Otherwise, the token is burned, and we must revert.
-                    // This handles the case of batch burned tokens, where only the burned bit
-                    // of the starting slot is set, and remaining slots are left uninitialized.
-                    _revert(OwnerQueryForNonexistentToken.selector);
-                }
-            }
-            // Otherwise, the data exists and we can skip the scan.
-            // This is possible because we have already achieved the target condition.
-            // This saves 2143 gas on transfers of initialized tokens.
-            // If the token is not burned, return `packed`. Otherwise, revert.
-            if (packed & _BITMASK_BURNED == uint256(0)) return packed;
-        }
-        _revert(OwnerQueryForNonexistentToken.selector);
-    }
-
-    /**
-     * @dev 返回当前的packed是否表示一个NFT存在
-     */
-    function _packedOwnershipExists(
-        uint256 packed
-    ) private pure returns (bool result) {
-        assembly {
-            // The following is equivalent to `owner != address(0) && burned == false`.
-            // 只有当owner不为0，且未被销毁时(一旦被销毁，owner变成0)，result才能为true
-            result := gt(
-                and(packed, _BITMASK_ADDRESS),
-                and(packed, _BITMASK_BURNED)
-            )
-        }
-    }
-
-    // =============================================================
     //                     EXTRA DATA OPERATIONS
     // =============================================================
 
@@ -1224,6 +1255,10 @@ contract ERC721A is IERC721A {
         uint24 extraData = uint24(prevOwnershipPacked >> _BITPOS_EXTRA_DATA);
         return uint256(_extraData(from, to, extraData)) << _BITPOS_EXTRA_DATA;
     }
+
+    // =============================================================
+    //                            IERC165
+    // =============================================================
 
     /**
      * @dev 这个函数可以被用来检测某个合约是否实现了对应接口中的函数

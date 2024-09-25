@@ -74,7 +74,7 @@ abstract contract ERC721A_URIStorage is ERC721A {
         delete _tokenURIs[tokenId];
     }
 
-    function _deleteBatchTokenURI(uint256[] memory tokenIds) public {
+    function _deleteBatchTokenURI(uint256[] memory tokenIds) internal {
         for (uint8 i = 0; i < tokenIds.length; i++) {
             delete _tokenURIs[tokenIds[i]];
         }

@@ -1,7 +1,7 @@
 pragma solidity ^0.8.0;
 
 import "forge-std/Test.sol";
-import "../src/NFT.sol";
+import "../src/ImageToken.sol";
 import "../src/interface/IERC721A.sol";
 import "../src/interface/IERC721Error.sol";
 
